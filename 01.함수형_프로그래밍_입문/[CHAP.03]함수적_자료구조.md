@@ -241,3 +241,94 @@ val ex3: List[String] = Cons("a", Cons("b", Nil))
 - 이처럼
   - **형식 추론**이 최대로 일어나도록
   - **함수 인수**들을 적절한 순서의 **여러 인수 목록**들로 묶는 경우가 많음
+
+## 3.4. 목록에 대한 재귀와 고차 함수로의 일반화
+- `sum`과 `product`의 구현
+  ```scala
+
+  def sum(ints: List[Int]):Int = ints match {
+    case Nil => 0
+    case Cons(x, xs) => x + sum(xs)
+  }
+
+  def product(ds: List[Double]) : Double = ds match {
+    case Nil => 1.0
+    case Cons(x, xs) => x * product(xs)
+  }
+  ```
+  - `product`의 경우 `0.0` 점검을 위한 `short-circuiting` 논리를 포함하지 않음
+  - 정의는 매우 비슷함
+- `+, *` 연산 및 `0, 1.0`인 부분만 제외하면, 통합이 가능함
+- 개선 예시
+  ```scala
+  def foldRight[A,B](as:List[A], z:B)(f:(A,B) => B) : B = {
+    as match {
+      case Nil => z
+      case Cons(x, xs) => f(x, foldRight(xs, z)(f))
+    }
+  }
+
+  def sum2(ns: List[Int]) = foldRight(ns, 0)((x,y) => x+ y)
+  def product2(ns: List[Double]) = foldRight(ns, 1.0)(_ * _) // `(x, y) => x * y` 를 간결하게 표시
+  ```
+
+#### 익명 함수를 위한 밑줄 표기법
+- 스칼라가 `x, y`의 형식을 추론할 수 있다면
+  - `(x, y) => x + y`를 `_ + _`로 표기 가능
+- 이는 **함수 매개변수**들이, 본문 내에서 **한 번씩만 언급 될 떄** 유용함
+- 예시
+  ```scala
+  _ + _ // (x, y) => x + y
+  _ * 2 // x => x * 2
+  _.head // xs => xs.head
+  _ drop _ // (xs, n) =>  xs.drop(n)
+  ```
+- 단, 적당히 사용해야 함
+- 스칼라에서는 **밑줄 기반 익명 함수**의 범위에 적용하는 **정밀한 규칙**이 있으나,
+  - 그런 규칙을 따질 정도라면, 그냥 보통의 **이름 붙인 매개변수**를 사용하는게 좋음
+
+#### foldRight의 특징
+- 하나의 **요소 형식**에만 특화되지 않음
+- 함수가 돌려주는 값이 **목록의 요소**와 같은 형식일 필요도 없음
+- 원리
+  ```scala
+  Cons(1, Cons(2, Nil))
+  // 위 식을, 아래와 같이 변경
+  f(1, f(2,z))
+  ```
+- 구체적인 예시
+  ```scala
+  foldRight(Cons(1, Cons(2, Cons(3, Nil))), 0)((x,y) => x + y)
+
+  1 + foldRight(Cons(2, Cons(3, Nil)), 0)((x,y) => x + y)
+  1 + (2 + foldRight(Cons(3, Nil), 0)((x,y) => x + y))
+  1 + (2 + (3 + (foldRight(Nil, 0)((x,y) => x + y))))
+  6
+  ```
+- `foldRight`가 하나로 축약(`collapsing`)되려면,
+  - 반드시 몰고의 끝까지 `traversal` 해야 함
+
+### 3.4.1. 그 외의 목록 조작 함수들
+#### 표준 라이브러리의 목록들
+- `::`은 **오른쪽으로 연관됨**
+  - 스칼라에서 이름이 `:`로 끝나는 모든 메서드는, 오른쪽으로 연관
+  - `x :: xs`는 `xs.::(x)`와 동일하며, `::(x,xs)` 자료생성자를 호출
+- `1 :: 2 :: Nil`은 `(1 :: (2 :: Nil))`과 동일
+  - 이는 `List(1,2)`와 같음
+- `case Cons(h, t)`는 `case h :: t`와 같음
+  - 여러 요소를 아우르기 위해, 괄호가 필요하지 않음(`case h :: h2 :: t`)
+- 유용한 함수
+  ```scala
+  def take(n: Int): List[A]
+  def takeWhile(f:A => Boolean): List[A]
+  def forAll(f:A => Boolean): Boolean
+  def exists(f: A => Boolean): Boolean
+  scanLeft , scanRight // foldLeft, foldRight와 유사하나, 최종적으로 누적된 값만이 아닌, 부분결과의 List 반환
+  ```
+
+### 3.4.2. 단순 구성요소들로 목록 함수를 조립할 때의 효율성 손실
+- `List`의 문제는
+  - 범용적인 함수로 표현은 가능하나,
+  - 그 결과로 만들어진 구현이 **항상 효율적이지 않음**
+- 같은 입력을 **여러번 읽는** 구현이 만들어질 수 있으며,
+  - 이른 종료를 위해서는 **명시적인 재귀 루프**를 작성해야 할 수 있음
