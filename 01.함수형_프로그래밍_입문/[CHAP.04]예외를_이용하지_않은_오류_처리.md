@@ -310,3 +310,105 @@ def failingFn(i: Int): Int = {
 - 컴파일러는 이 묶음들을 `flatMap` 호출로 전개하되,
   - 마지막 묶음과 `yield`는 `map` 호출로 변환
 - 명시적인 `flatMap`, `map` 호출이 나열된 코드라면 사용해볼 것
+
+## 4.4. Either 자료 형식
+- **실패**와 **예외**를 보통의 값으로 표현할 수 있다는 점
+- 오류 처리 및 복구에 대한 **공통의 패턴**을 추상화하는 함수를 작성할 수 있다는 점
+- `Option`이 많이 쓰이긴 하나, 다른 자료형식도 많음
+- `Option`은 **예외적인 조건**이 발생했을 때
+  - 무엇이 잘못되었는지에 대한 **정보를 제공할 수 없음**
+  - **실패**시 단순히, 유효한 값이 없음을 뜻하는 `None`을 돌려줄 뿐
+- 좀 더 자세한 정보를 담은 `String`을 돌려준다거나,
+  - 예외가 발생한 경우 **실제로 발생한 오류가 어떤 것인지** 알 수 있는 무언가를 돌려주면 좋음
+- 실패에 관해 알고 싶은 정보가 어떤 것이든
+  - 그것을 **부호화**하는 **자료 형식**을 만드는 것은 가능함
+- 단순히 실패가 발생했음을 알면 충분할 때는 `Option`을 사용
+- **실패의 원인을 추적할 수 있는 `Either` 자료 형식**
+- 함수 시그니처
+  ```scala
+  sealed trait Either[+E, +A]
+  case class Left[+E](value: E) extends Either[E, Nothing]
+  case class Right[+A](value: A) extends Either[Nothing, A]
+  ```
+- `Option`과의 차이
+  - 두 경우 모두 값을 가짐
+- `Either`는 **둘 중 하나**일 수 있는 값을 대표 함
+- 이 형식은 두 형식의 `disjoint union`(분리합집합)이라 할 수 있음
+- 이 형식을 **성공** 또는 **실패**를 나타낼 때,
+  - `Right` 생성자를 **성공**을 나타내는데 사용하며
+  - `Left` 생성자를 **실패**에 사용
+    - 왼쪽 형식 매개변수로 `error`를 의미하는 `E`를 사용
+
+#### 표준 라이브러리의 Option과 Either
+- `Option`, `Either` 모두 표준 라이브러리에 존재
+- 물론 현재 구현하는 내용과 몇몇 함수는 지원하지 않음
+  - `sequence`, `traverse`, `map2`, ...
+
+#### mean의 예시
+```scala
+def mean(xs: IndexedSeq[Double]) : Either[String, Double] =
+  if (xs.isEmpty)
+    Left("mean of empty list!") // 실패일 경우에 String 반환
+  else
+    Right(xs.sum / xs.length)
+```
+- 예외에 대한 자세한 정보를 담을 때 `exception`을 돌려주면 됨
+  ```scala
+  def safeDiv(x:Int, y:Int): Eighter[Exception, Int] =
+    try Right(x/y)
+    catch {
+      case e: Exception => Left(e)
+    }
+  ```
+- Try 예시 : 던저진 예외를 **값**으로 변환
+  ```scala
+  def Try[A](a: => A): Either[Exception, A] =
+    try Right(a)
+    catch {
+      case e: Exception => Left(e)
+    } 
+  ```
+
+#### for-comprehension에서의 `Either`
+```scala
+def parseInsuranceRateQuote(
+  age: String,
+  numberOfSpeedingTickets: String): Either[Exception, Double] =
+    for {
+      a <- Try { age.toInt}
+      tickets <- Try {numberOfSpeedingTickets.toInt}
+    } yield insuranceRateQuote(a, tickets)
+```
+- 실패시 단순 `None`이 아니라, 실제 예외에 대한 정보를 얻을 수 있음
+
+
+#### CODE.4.4. Either를 자료 유효성 점검에 활용
+- `map2`에 적용한 예시
+- `mkPerson`은 주어진 이름과 나이의 유효성을 점검한 후,
+  - 유효한 `Persion`을 생성
+- 코드
+  ```scala
+  case class Person(name:Name, age: Age)
+  sealed class Name(val value: String)
+  sealed class Age(val value: Int)
+
+  def mkName(name: String): Either[String, Name] =
+    if(name == "" || name == null) Left("Name is empty")
+    else Right(new Name(name))
+  
+  def mkAge(age: Int): Either[String, Age] =
+    if(age < 0) Left("Age is out of range")
+    else Right(new Age(age))
+  
+  def mkPerson(name: String, age: Int): Either[String, Person] =
+    mkName(name).map2(mkAge(age))(Person(_, _))
+  ```
+
+## 4.5. 요약
+- 예외를 **보통의 값**으로 표현하고
+  - 고차함수를 이용하여, 오류 처리 및 전파의 **공통 패턴**을 **캡슐화**
+- 임의의 값으로 표현
+- 예외는 정말 **복구 불가능한 조건**에서만 활용
+- `non-strict`(비엄격성) 개념
+  - `orElse, getOrElse, Try`
+  - 비엄격성이 어떻게 함수적 프로그래밍의 **모듈성**과 **효율성**을 높여주는지
