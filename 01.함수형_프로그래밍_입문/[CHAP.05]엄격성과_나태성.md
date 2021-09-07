@@ -109,3 +109,82 @@
   - 그러한 표현식을 `terminate`하지 않는 표현식 또는 `bottom`으로 평가되는 표현식이라 부름
 - 만일 **바닥**으로 평가되는 모든 `x`에 대해 표현식 `f(x)`가 바닥으로 평가되면,
   - 그러한 함수 `f`는 **엄격한** 함수이다
+
+## 5.2. 확장 예제: 게으른 목록
+- 스칼라에서 나태성을 사용하는 예시
+  - 함수적 프로그램의 **효율성**과 **모듈성**을 `lazy list` 또는 `stream`을 이용하여 계산
+
+### Stream의 간단한 정의
+```scala
+sealed trait Stream[+A]
+case object Empty extends Stream[Nothing]
+case class Cons[+A](h:() => A, t:() => Stream[A]) extends Stream[A]
+// 비지 않은 스트림은 하나의 머리와, 꼬리로 구성
+// 둘 다 엄격하지 않은 값이며,
+// 기술적인 한계로, 이는 이름으로 전달되는 인수가 아닌, 반드시 명시적으로 강제해아하는 성크
+
+object Stream {
+  // 비지 않은 스트림의 생성을 위한 똑똑한 생성자
+  def cons[A](hd: => A, tl: => Stream[A]): Stream[A] = {
+    lazy val head = hd // 평가 반복을 피하기 위해 head, tail을 값 파싱
+    lazy val tail = tl
+    Cons(() => head, () => tail)
+  }
+  def empty[A]: Stream[A] = Empty // 특정 형식의 빈 스트림을 생성하기 위한 똒똑한 생성자
+
+  // 여러 요소로 이루어진 Stream의 생성을 위한 편의용 `가변 인수 메서드`
+  def apply[A](as: A*): Stream[A] =
+    if (as.isEmpty) empty else cons(as.head, apply(as.tail: _*))
+}
+```
+- `List`와 유사하나, `Cons`의 자료 생성자가
+  - 보통의 엄격한 값이 아닌, `thunk`(`() => A`와 `() => Stream[A]`)를 받는다는 것이 다름
+  - `Stream`을 순회하려면, `if2`의 정의와 마찬가지로
+    - `thunk`의 평가를 강제해야 함
+- 예시 : `Stream`에서 head를 추출하기
+  ```scala
+  def headOption: Option[A] = this match {
+    case Empty => None
+    case Cons(h,t) => Some(h()) // h()를 통해, thunk h를 명시적으로 강제
+  }
+  ```
+  - 강제하는 부분외, `List`와 동일하게 동작
+  - 실제 요구된 부분만 평가(Cons의 꼬리는 평가하지 않음)하므로, `Stream`의 이 능력은 유용
+
+### 5.2.1. 스트림의 메모화를 통한 재계산 피하기
+- `Cons` 노드가 강제 되었다면, 그 값을 **캐싱**해두는 것이 바람직
+- 다음과 같이 `Cons` 자료 생성자를 직접 사용한다면, `expensive(x)`가 두번 계산 됨
+  ```scala
+  val x = Cons(() => expensive(x), tl)
+  val h1 = x.headOption
+  val h2 = x.headOption
+  ```
+- 일반적으로 이런 문제는 추가적인 `invariant`(불변식)을 보장하거나
+- **패턴 부합**에 쓰이는 생성자와는 조금 다른 **서명**을 제공하는
+  - 자료 형식을 생성하는 함수인 똑똑한 생성자(smart)를 이용하여 피함
+- **똑똑한 생성자**의 이름으로는
+  - 해당 자료 생성자의 **첫 글자를 소문자로 바꾼 것을 사용하는 것이 관례**
+- 위 `cons`는 `Cons`의 머리와 꼬리를 이름으로 전달 받아, `memoization`을 수행
+  - 이는 흔히 쓰이는 기법으로,
+  - 이렇게 하면 `thunk`는 오직 한번만(`처음으로 강제될 때`) 평가되고
+  - 이후의 강제에서는 캐싱된 `lazy val`이 반환
+- `cons` 예시
+  ```scala
+  def cons[A](hd: =>A, tl: => Stream[A]): Stream[A] = {
+    lazy val head = hd
+    lazy val tail = tl
+    Cons(() => head, () => tail)
+  }
+  ```
+- empty **똑똑한 생성자**는 `Empty`를 그냥 돌려주나,
+  - `Empty`의 형식이 `Stream[A]`로 지정되어 있음
+  - 경우에 따라 이 형식이 **형식 추론**에 더 적합함
+- `apply` 예시
+  ```scala
+  def apply[A](as: A*): Stream[A] =
+    if (as.isEmpty) empty
+    else cons(as.head, apply(as.tail: _*))
+  ```
+- 인수들을 `cons`안에서 `thunk`로 감싸는 작업은 `scala`가 내부적으로 처리
+- `as.head`와 `apply(as.tail: _*)` 표현식은
+  - `Stream`이 강제할 때까지는 평가되지 않음
