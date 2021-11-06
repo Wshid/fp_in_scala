@@ -342,3 +342,69 @@ map2(
   - `run`은 병렬성을 구현하는 **어떤 수단**을 갖추어야 한다
 - `새 스레드`를 생성하거나, `과제`를 `스레드 풀`에 위임할 수도 있고
   - 그 밖에 다른 어떤 메커니즘을 사용할 수 있음
+
+## 7.2. 표현의 선택
+- Par를 위한 API 개요
+  ```scala
+  def unit[A](a: A): Par[A] // 즉시 평가되어서 결과 a를 산출하는 계산 생성
+  def map2[A,B,C](a: Par[A], b: Par[B])(f: (A,B) => C): Par[C] // 두 병렬 계산의 결과들을 이항 함수로 조합
+  def fork[A](a: => Par[A]):Par[A] // 이후 run이 동시적으로 평가할 계산임을 암시
+  def lazyUnit[A](a: => A): Par[A] = fork(unit(a)) // run이 동시적으로 평가할 표현식 a를 감싼다
+  def run[A](a: Par[A]): A // 주어진 Par를, fork의 요청에 따라 병렬 계산 수행, 이후 그 결과 값을 추출함으로써 완전히 평가
+  ```
+- 여러 함수에 느슨하게나마 의미가 부여됨
+  - `unit`
+    - 상수 값을 **병렬 계산**으로 승격(promote)
+  - `map2`
+    - 두 병렬 계산의 결과들을 **이항 함수**로 조합
+  - `fork`
+    - 주어진 인수가 **동시적으로 평가될 계산**임을 암시
+    - 그 평가는 `run`에 강제 되어야 실제로 실행
+  - `lazyUnit`
+    - 평가되지 않은 인수를 `Par`로 감싸고
+    - 그것을 **병렬 평가 대상**으로 표시
+  - `run`
+    - 계산을 실제로 실행해서 `Par`로부터 값을 추출
+- `API 개요`를 만드는 과정에서 **추상 형식**들이 등장하는데,
+  - 개요를 만드는 도중에도 그 형식들의 가능한 **표현**을 생각해보는 것은 당연한 일
+- 적당한 표현을 고안할 수 있는지 시도하기
+  - `run`이 어떤 방법으로든 **비동기적 과제**들을 실행해야 함
+- 저수준 `API`를 직접 작성할 수도 있겠으나,
+  - `java.util.concurrent.ExecutorService`가 이미 존재
+- 이 클래스를 scala로 옮긴 코드
+  ```scala
+  class ExecutorService {
+    def submit[A](a: Callable[A]): Future[A]
+  }
+  trait Callable[A] { def call: A } // 사실상 그냥 게으른 A
+  trait Future[A] {
+    def get: A
+    def get(timeout: Long, unit: Timeunit): A
+    def cancel(evenIfRunning: Boolean): Boolean
+    def isDone: Boolean
+    def isCancelled: Boolean
+  }
+  ```
+- `ExecutorService::submit` 메서드는
+  - 주어진 `Callable` 값(스칼라에서는 그냥 `submit`에 대한 게으른 인수)에 대응되는
+  - 필요에 따라 **개별 스레드**에서 실행할 계산을 처리해주는
+    - `Future` 객체를 돌려줌
+- 계산의 결과는 `Future`의 `get`메서드로 얻을 수 있음
+  - 이 메서드는 결과가 준비될 때까지 현재 스레드의 실행 차단
+- `Future`는 또한 **계산의 취소**를 위한 **추가적인 기능**(일정 시간 동안 차단 후 예외를 던지는 등)도 제공
+- `run` 함수가 `ExecutorService`에 접근할 수 있다고 가정하고,
+  - 그것이 `Par`의 표현을 선택하는 데 어떤 통찰을 접근하는지 확인
+    ```scala
+    def run[A](s: ExecutorService)(a: Par[A]): A
+    ```
+- `Par[A]`의 표현으로 사용할 수 있는 가장 간단한 모형은 `ExecutorService => A`
+- 이 표현을 선택한다면, `run`을 구현하기가 매우 쉬우나
+  - 계산 완료까지의 `대기 시간`이나 `취소 여부`를 `run`의 호출자가 결정할 수 있게 하면 더 좋을 것
+- 이를 위해 `Par[A]`를 `ExecutorService => Future[A]`로 두고
+  - `run`은 `Future`를 돌려주게 변경
+  ```scala
+  type Par[A] = ExecutorService => Future[A]
+  def run[A](s: ExecutorService)(a: Par[A]): Future[A] = a(s)
+  ```
+- `Par`가 `ExecutorService`를 필요로 하는 **하나의 함수**로 표현되었기 때문에
+  - `Future`의 생성은 이 `ExecutorService`가 제공되기 전까지 일어나지 않음
