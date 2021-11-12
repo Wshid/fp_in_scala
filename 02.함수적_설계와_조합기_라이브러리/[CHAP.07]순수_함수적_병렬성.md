@@ -408,3 +408,119 @@ map2(
   ```
 - `Par`가 `ExecutorService`를 필요로 하는 **하나의 함수**로 표현되었기 때문에
   - `Future`의 생성은 이 `ExecutorService`가 제공되기 전까지 일어나지 않음
+
+## 7.3. API의 정련
+- 지금까지의 작업 방식은 다소 **작위적**
+- 실무에서는 API 설계와 **표현 선택 사이의 경계**가 지금만큼 명확하지 않음
+- 표현에 대한 착안이 API 설계 개선에 도움이 되기도 하고,
+  - API의 특성이 표현의 선택에 힌트가 되기도 함
+- 두 관점 사이를 **유동적**으로 오가면서
+  - 질문이 제기되면
+  - 원형을 만들어 **실험**을 수행해보는 식으로 진행하는 것이 자연스러움
+- `primitive`들을 정의하고, **적절한 정의**를 부여
+- 지금까지 개발한 API 함수들을 구현하기
+  - `Par`에 대한 표현이 정해졌기 때문에 그리 어렵지 않은 과정
+
+#### CODE.7.5. Par의 기본적인 구현
+```scala
+object Par {
+  // unit은 UnitFuture를 돌려주는 함수로 표현
+  // UnitFuture는 Future의 단순한 구현으로, 단순 상수 값을 감싸기만 할 뿐
+  // ExecutorService는 전혀 사용하지 않음
+  // UnitFuture는 항상 완료 가능하며 취소는 불가능
+  // UnitFuture::get 메서드는 이전에 주어진 상수 값을 돌려주기만 함
+  def unit[A](a: A): Par[A] = (es: ExecutorService) => UnitFuture(a)
+
+  private case class UnitFuture[A](get: A) extends Future[A] {
+    def isDone = true
+    def get(timeout: Long, units: TimeUnit) = get
+    def isCancelled = false
+    def cancel(evenIfRunning:Boolean): Boolean = false
+  }
+
+  // 이 API에서 병렬성 제어는 오직 `fork`함수만 담당한다는 설계상의 선택에 따라
+  // map2는 f 호출을 논리적 스레드에서 평가하지 않음
+  // f를 개별 스레드에서 평가하고 싶다면 fork(map2(a,b,)(f))를 사용하면 됨 
+  def map2[A,B,C](a: Par[A], b: Par[B])(f: (A,B) => C): Par[C] =
+    (es: ExecutorService) => {
+      val af = a(es)
+      val bf = b(es)
+      UnitFuture(f(af.get, bf.get))
+      // map2의 구현은 `만료 시간`을 지키지 않음
+      // 이 구현은 ExecutorService를 두 Par 값에 전달하고
+      // Future의 af와 bf의 결과들을 기다리고
+      // 그것들을 f에 적용
+      // 적용 결과를 UnitFuture로 감싼다
+      // 만료 시간을 지키기 위해서는
+      // af의 평가에 걸린 시간을 측정하고
+      // bf의 평가에 걸린 시간에서
+      // 그 시간을 빼는 식의, 새로운 Future 구현이 필요
+    }
+  
+  def fork[A](a: => Par[A]): Par[A] =
+    es => es.submit(new Callable[A] {
+      def call = a(es).get
+    })
+  /**
+    * 이것이 fork의 가장 간단하고 자연스러운 구현
+    * 단 몇가지 문제점 존재
+    * 외곽의 Callable은 `안쪽 과제가 완료될 때까지 차단`
+    * 이러한 차단이, 스레드 풀의 한 스레드(또는 ExecutorService 내부에서 쓰이는 어떤 자원)을 점유하여
+    * 이는 `잠재적 병렬성의 일부 소실`을 의미
+    * 본질적으로 이 구현은, 한 스레드로 충분한 작업을 `두 스레드로 나누어 수행`
+    * 이는 이 구현의 좀 더 심각한 문제점의 증상
+    **/
+}
+```
+- `Future` 인터페이스가 **순수 함수적**이지는 않음
+  - 이는 이 예제 라이브러리의 사용자가
+  - `Future`를 직접 다루게 하는 것이 **바람직하지 않은 이유**의 일부
+- 중요한 것은, 이 `Future`의 메서드들이 **부수 효과**에 의존하긴 하지만
+  - `Par API` 자체는 여전히 **순수**함
+- `Future` 내부 동작 방식은, 오직 사용자가 `run`을 호출해서
+  - 구현이 `ExecutorService`를 받게 되어야 드러남
+- 구현이 언젠가는 **효과**들에 의존하긴 하지만,
+  - 사용자는 항상 **순수한 인터페이스**로 프로그램을 짤 수 있음
+- `API`가 순수하므로, 그 효과들은 사실상 **부수 효과가 아님**
+
+#### 암묵적 변환을 이용한 중위 구문 추가
+- `Par`가 실제 자료 형식이라면,
+  - `map2` 같은 함수를 **클래스 본문**에 두고
+  - `x.map2(y)(f)` 같은 **중위 구문**으로 호출 가능
+    - `Stream`이나 `Option`에나 했던 것과 동일한 방식
+- 그러나 `Par`는 형식 별칭이므로, 직접적으로 그렇게 할 수 없음
+- `implicit conversion`을 이용해 **임의의 형식**에 중위 구문을 추가하는 요령이 존재
+- 여기서는 다루지 않음
+
+### 기존 조합기의 확장
+- 구체적인 예시
+  - 하나의 `List[Int]`를 산출하는 병렬 계산을 나타내는 
+    - `Par[List[Int]]`가 있다고 가정
+  - 이것을 **결과가 정렬된** `Par[List[Int]]`로 변환하고자 함
+- 코드
+  ```scala
+  def sortPart(parList: Par[List[Int]]): Par[List[Int]]
+  ```
+- 물론 `Par`에 `run`을 적요하고, 결과 목록을 정렬하고
+  - 정렬된 목록을 `unit`을 이요해서 다시 `Par`로 꾸밀 수 있음
+- 우리는 `run`의 호출을 피하고자 함
+- `unit`외에 `Par`의 값을 어떤 방식으로 조작할 수 있는 **조합기**는 `map2`뿐이라 가정
+- 그렇다면, 만일 `ParList`를 `map2`의 양변 중 하나에 지정한다면,
+  - `List` 내부에 접근해서 목록을 **졍렬**할 수 있음
+- `map2`의 다른 변에는 아무것이나 넣어도 되므로, 그냥 `no-op`을 전달하기로 함
+  ```scala
+  def sortPar(parList: Part[List[Int]]): Par[List[Int]] =
+    map2(parList, unit(()))((a, _) => a.sorted)
+  ```
+
+### 일반화
+- `A => B` 형식의 **임의의 함수**를
+  - `Par[A]`를 받고 `Par[B]`를 돌려주는 함수로 **승급**(`lift`)할 수 있음
+- 코드
+  ```scala
+  def map2[A,B](pa: Par[A])(f: A => B): Par[B] =
+    map2(pa, unit(()))((a, _) => f(a))
+
+  // sortPar의 정의
+  def sortPar(parList: Par[List[Int]]) = map(parList)(_.sorted)
+  ```
