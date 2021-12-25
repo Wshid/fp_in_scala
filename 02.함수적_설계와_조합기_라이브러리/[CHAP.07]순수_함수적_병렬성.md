@@ -779,3 +779,132 @@ object Par {
 - 우리가 원했던 것은
   - 임의의 계산을 **고정 크기 스레드 풀**로 돌리는 것
 - `Par`를 다른 방식으로 구현해야 함
+
+## 7.4.4. 행위자를 이용한 완전 비차단 Par 구현
+- **고정 크기 스레드 풀**로도 잘 작동하며
+  - 전혀 차단되지 않는(fully non-blocking, 완전비차단) 방식의 `Par` 구현 개발
+- 현재 표현의 본질적인 문제
+  - `Future::get`을 호출하지 않고서는, `Future`의 값을 꺼낼 수 없음
+  - 그 메서드를 호출하면 `현재 스레드`의 실행이 **차단**됨
+- `Par`의 표현이 이런식으로 `자원을 흘리지 않도록`하려면
+  - **비차단**(non-blocking) 방식이어야 함
+- **비차단**은
+  - `fork`와 `map2`의 구현이 **현재 스레드를 차단 하는 메서드**(`e.g. Future.get`)을
+  - 절대로 호출하지 말아야 함
+- 법칙을 만족할 수 있도록 **한 번만** 제대로 구현하면 됨
+  - 일단 검사를 통과한다면, 라이브러리 사용자들은 항상 **정확한 결과**를 내는
+  - 합성 가능한 **추상 API**를 즐길 수 있음
+
+### 기본 착안
+- `Par`의 **비차단 표현**을 하려면
+- `Par`를 `java.util.concurrent.Future`로 바꾸어
+  - 값을 **꺼내는**(이에 의해 차단이 발생하는) 대신,
+  - **적당한 때에 호출되는 콜백을 등록할 수 있는** `Future`를 도입하기
+    - 관점의 전환
+- 코드
+  ```scala
+  sealed trait Future[A] {
+    // fpinscala.parallelism 패키지의 private 멤버
+    // 오직 그 패키지 안의 코드에서만 이 메서드 접근 가능
+    private[parallelism] def apply(k: A => Unit): Unit
+  }
+  // 이전과 동일한 모습이나, `java.util.concurrent`것이 아닌, 직접 만든 Future를 사용
+  type Par[+A] = ExecutorService => Future[A]
+  ```
+- 새로운 `Future API`는 `java.util.concurrent`와 다름
+- 이전의 `Future`는 `get`메서드를 제공했지만,
+  - 새 `Future`는 `A` 형식의 결과를 산출하는 함수 `k`를 받고
+  - 그 결과를 이용해서 어떤 효과를 수행하는 `apply` 메서드를 제공
+  - 이런 종류의 함수를 **계속 함수**(continuation)또는 **콜백**(callback)이라고 부름
+- `apply` 메서드에는 `private[parallelism]`이 지정되어 있음
+  - 이 메서드는 라이브러리 사용자에게 노출되지 않음
+  - `fpinscala.parallelism` 패키지 안에서만 접근 가능
+  - `API`의 **순수성**을 유지하며, 법칙들의 성립이 보장됨
+
+#### 순수 API에 국소 부수 효과 사용
+- 지금 정의한 `Future`의 형식은 **다소 명령식**(imperative)
+- `A => Unit`
+  - 반환된 결과를 사용하지 않음
+  - 함수는 주어진 `A`를 이용하여, 어떤 **효과를 수행**할 때만 유용
+- `Future`같은 형식을 사용하면 **함수형 프로그래밍**에서 벗어나는것은 아님
+- **부수 효과**를 **순수 함수적 API**의 **구현 세부사항**으로 사용한다는
+  - 일반적인 기법을 적용한 것
+- 해당 부수 효과들이 `Par`를 사용하는 사용자에게는 **보이지 않기** 때문
+- `Future.apply`는 **보호되는 메서드**이므로
+  - 외부 코드에서 호출이 전혀 불가
+- 비차단 Par 구현의 나머지 부분을 보면
+  - **외부 코드**에서는 **부수 효과**를 관찰할 수 없음
+- **국소 효과**(local effect; 지역 효과), **관찰 가능성**(observability),
+  - **순수성**과 **참조 투명성**등의 미묘한 사항은 `CHAP.14`에서 논의
+
+#### run함수의 구현
+- `run`은 그냥 `A`를 돌려주는 형태
+- `Par[A]`를 받고 `A`를 돌려주므로,
+  - **콜백 함수**를 만들어서 `Future.apply`메서드에 전달할 필요가 있음
+
+##### CODE.7.6. Par를 위한 run의 구현
+```scala
+def run[A](es: ExecutorService)(p: Par[A]): A = {
+  // 결과를 저장하는 데 사용할, 변이가 가능하고 스레드에 안전한 참조
+  // java.util.concurrent.atomic 패키지 참고
+  val ref = new AtomicReference[A]
+
+  // java.util.concurrent.CountDownLatch를 이용하면
+  // countDown 메서드가 일정 횟수만큼 호출될 때까지
+  // 스레드를 대기시킬 수 있음
+  // countDown 메서드는 p로부터 A형식의 값을 받을 때 한 번 호출
+  // run의 구현은 그때까지 차단되어야 함
+  val latch = new CountDownLatch(1)
+
+  // 값을 받았으면, 결과를 설정하고 latch을 푸는 형태
+  p(es) {
+    a => ref.set(a);
+    latch.countDown
+  }
+  // 결과가 준비될때까지 기다렸다가, latch를 품
+  latch.await
+  // latch를 통과했다면, ref가 설정된 것. 이 값을 반환
+  ref.get
+}
+```
+- `latch`가 풀리길 기다리는 동안 `run`을 호출한 스레드가 **차단**됨
+- 차단되지 않도록 `run`을 구현하는 것은 불가능
+- 이 함수는 `A`형식의 값을 돌려주어야 하므로,
+  - 그 값이 준비되길 기다려야 함
+- 이 때문에 이 `API의 사용자`는 결과를 기다릴 수 있음이 확실한 때에만 `run`을 호출해야 함
+- `API`에서 `run`을 아예 제거하고,
+  - 대신 `Par`에 대한 `apply`메서드를 노출해서
+  - 사용자가 **비동기 콜백**을 등록하게 만들 수 있음
+  - 이 방법은 유효한 설계상 선택이겠으나, 현재는 이 형태로 유지
+- `Par`를 실제로 생성하는 예시: `unit`함수
+  ```scala
+  def unit[A](a: A): Par[A] =
+    es => new Future[A] {
+      def apply(cb: A => Unit): Unit = 
+        // 값을 콜백 함수에 전달, ExecutorService는 필요하지 않음
+        cb(a)
+    }
+  ```
+- `unit`은 이미 사용할 수 있는 `A`형식의 값을 가지고 있으므로,
+  - 그냥 그 값을 전달해서 **콜백 함수** `cb`를 호출하면 됨
+- 만일 그 콜백 함수가 우리의 `run`의 구현에서 비롯된 것이라면
+  - 그 호출에 의해 `latch`가 풀려 결과가 즉시 마련됨
+- `fork`의 예시: 실제 병렬성 도입
+  ```scala
+  def fork[A](a: => Par[A]): Par[A] =
+    es => new Future[A] {
+      def apply(cb: A => Unit):Unit = 
+        // eval은 의 평가를 위한 작업을 띄운 후, 즉시 반환
+        // 콜백은 이후 다른 스레드에서 비동기적으로 호출
+        eval(es)(a(es)(cb))
+    }
+  
+  // 어떤 ExecutorService를 이용해서 계산을 비동기적으로 평가하기 위한 보조 함수
+  def eval(es: ExecutorService)(r: => Unit):Unit =
+    es.submit(new Callable[Unit] { def call = r })
+  ```
+- `fork`가 돌려준 `Future`라는 이름으로 전달된
+  - 인수 `a`의 평가를 위한 작업을 띄움
+- 그 작업은 `a`를 실제로 평가, 호출해서 하나의 `Future[A]`를 산출하며,
+- 그 `Future`가 결과 `A`를 산출했을 때, 
+  - 호출될 콜백 함수 `cb`(`Future` 호출시 인수로 주어진)을 등록
