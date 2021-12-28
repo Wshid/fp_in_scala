@@ -105,7 +105,7 @@ def sum(ints: IndexedSeq[Int]): Int =
 - 즉, `unit`은 **비동기 계산**을 나타내는 `Par[Int]`를 돌려줌
 - `Par`를 `get`으로 넘겨주는 즉시,
   - `get`의 완료까지 실행이 차단된다는 **부수 효과**가 드러남
-  - `get`을 호출하지 않거나, 호출을 ㅗ치대한 미루어야 함
+  - `get`을 호출하지 않거나, 호출을 최대한 미루어야 함
 - 비동기 계산들을 `그 완료를 기다리지 않고, 조합할 수 있어야 함`
 
 #### 동시성 기본 수단을 직접 사용하는 것의 문제점
@@ -908,3 +908,126 @@ def run[A](es: ExecutorService)(p: Par[A]): A = {
 - 그 작업은 `a`를 실제로 평가, 호출해서 하나의 `Future[A]`를 산출하며,
 - 그 `Future`가 결과 `A`를 산출했을 때, 
   - 호출될 콜백 함수 `cb`(`Future` 호출시 인수로 주어진)을 등록
+- `map2`의 signature
+  ```scala
+  def map2[A,B,C](a: Par[A], b: Par[B])(f: (A,B) => C): Par[C]
+  ```
+  - 비차단 구현이 훨씬 까다로움
+  - `map2`는 두 `Par`인수를 **병렬**로 실행하여야 함
+  - 두 결과가 마련되면, 그 둘로 `f`를 호출하고
+    - 그 결과로 나온 `C`를 **콜백 함수**에 넘겨주어야 함
+  - 그 과정에서 몇 가지 `race condition`이 발생할 여지가 있음
+  - 그리고 `java.util.concurrent`의 **저수준** 기본 수단들만으로는
+    - 정확한 **비차단 구현**이 어려움
+
+### 간략한 행위자 소개
+- `map2`를 소개하기 위해 **행위자**(actor)라고 부르는
+  - **비차단 동시성 기본수단**을 사용
+- 본질적으로 행위자(`Actor`로 대표되는)는
+  - 하나의 **동시적 프로세스**
+  - 스레드를 **계속 차지하지 않음**
+  - 대신 `message`를 받았을 때에만 **스레드를 점유**
+- 여러 스레드가 동시에 **하나의 행위자**에 메세지를 보낼수는 있으나,
+  - 행위자는 그 메세지들을 `한 번에 한번씩만`처리
+  - 나머지 메세지는 이후 처리를 위해 **대기열**에 담아둠
+- 이런 특징 덕분에 **행위자**라는 **동시성 기본수단**은
+  - 여러 **스레드**가 접근해야 하는 까다로운 코드를 작성할 때 유용
+- 행위자 없이 그런 코드를 작성한다면
+  - **경쟁 조건**이나 **교착 상태**가 발생하기 쉬움
+- 스칼라 표준 라이브러리의 `scala.actors.Actor`
+  - 목적에 잘 맞은 행위자 구현중 하나
+- 전체 구현의 일부(예제 코드의 `Actor.scala` 파일에 존재)
+  ```scala
+  // message가 도착하면, 행위자는 ExecutorService를 이용해서 그것을 처리
+  // 이를 위해 ExecutorService를 하나 생성
+  val S = Executors.newFiexedThreadPool(4)
+  val echoer = Actor[String](S) {
+    // 아주 단순한 행위자
+    // String 메세지를 그대로 출력
+    // 메세지 처리에 사용할 ExecutorService 객체 S를 전달
+    msg => println (s"Got message: '$msg'")
+  }
+
+  // Actor test
+  // 행위자에게 "hello" 메세지를 보냄
+  scala> echoer ! "hello"
+
+  // 해당 지점에서 echoer가 스레드를 점유하지 않음
+  // 더 처리할 메세지가 없기 때문
+  scala>
+
+  // "goodbye" 메세지를 행위자에게 보냄
+  // 행위자는 자신의 ExecutorService에 과제를 제출하여 그 메세지를 처리
+  scala> echoer ! "goodbye"
+
+  scala> echoer ! "You're just repeating every..."
+  ```
+- `Actor`의 구현을 모두 이해할 필요는 없음
+  - 관심이 있다면 `Actor.scala`파일을 확인할 것
+
+### 행위자를 이용한 map2 구현
+- 두 인수의 결과를 취합하는 `map2`를 `Actor`를 이용하여 구현해 보기
+- 코드는 직관적
+- `Actor`가 메세지를 한 번에 하나씩만 처리하기 때문에 `race condition`을 걱정할 필요가 없음
+
+#### CODE.7.7. Actor를 이용한 map2 구현
+```scala
+def map2[A,B,C](p: Par[A], p2:Par[B])(f: (A,B) => C): Par[C] =
+  es => new Future[C] {
+    def apply(cb: C => Unit): Unit = {
+      // 두 개의 변이 가능 var가 두 개의 결과를 저장하는데 쓰임
+      var ar: Option[A] = None
+      var br: Option[B] = None
+
+      // 두 결과를 기다렸다가 `f`로 결합해 `cb`에 넘겨주는 행위자
+      val combiner = Action[Either[A,B]](es) {
+        // A 결과가 먼저 오면 그것을 `ar`에 담아두고 `B`를 기다림
+        // B 결과를 이미 받았고, A 결과가 왔다면,
+        // 두 결과로 `f`를 호출하여 C를 얻고, 그것을 콜백함수 cb에 전달
+        case Left(a) => br match {
+          case None => ar = Some(a)
+          case Some(b) => eval(es)(cb(f(a, b)))
+        }
+        // 마찬가지로 `B`결과가 먼저오면, 그 결과를 br에 담아두고 `A`를 기다림
+        // `A`결과를 이미 받았고 `B`결과가 왔다면,
+        // 두 결과로 `f`를 호출하여 `C`를 얻고, 그것을 콜백 함수 `cb`에 전달
+        case Right(b) => ar match {
+          case None => br = Some(b)
+          case Some(a) => eval(es)(cb(f(a, b)))
+        }
+      }
+
+      // 행위자를 양변에 콜백으로써 넘겨줌
+      // A쪽에서는 결과를 `Left`로 감싸고, B쪽에서는 Right로 감싼다
+      // 이들은 `Either` 자료 형식의 생성자들로
+      // 결과가 비롯된 행위자를 가리키는 역할을 함
+      p(es)(a => combiner ! Left(a))
+      p2(es)(b => combinder ! Right(b))
+    }
+  }
+```
+- 이러한 구현이 있다면, 아무리 복잡한 `Par` 값들이어도
+  - 스레드 고갈을 걱정하지 않고 사용 가능
+- 심지어 행위자가 `하나의 JVM thread`에만 접근할 수 있다해도 마찬가지
+- 테스트 코드
+  ```scala
+  val p = parMap(List.range(1, 100000))(math.sqrt(_))
+  val x = run(Executors.newFixedThreadPool(2))(p)
+  ```
+  - `fork`가 약 10만번 호출
+  - 처음에는 행위자들이, 그 값들을 한 번에 **두개씩** 결합
+  - 비차단 `Actor`구현 덕분에
+    - `JVM thread`를 10만개 사용하지 않고도 전체 계산이 무리없이 진행
+- **고정 크기 스레드 풀**에 대해서도 `fork`의 법칙 성립
+
+### 법칙의 중요성
+- 이번 절의 목적은 `fork`의 바람직한 구현이 아닌, **법칙들의 중요함**을 보여주는 것
+- 라이브러리 설계를 고민할때, **법칙**들은 문제를 다른 각도에서 보게 해줌
+  - 이번 장에서 `API의 법칙`을 적어두지 않았다면,
+  - 첫 구현의 스레드 자원 누수 문제를 한참 후에야 발견 가능
+- 일반적으로 독자의 `API 법칙`들을 고를때, 고려할만한 접근 방법은 여러가지
+  - **개념적 모형**을 고민하면서
+    - 그 모형이 반드시 **준수**해야할 법칙들을 끌어낼 수 있음
+  - 그냥 유용하거나 도움이 될만한 법칙을 먼저 **창안**하고(`fork` 처럼)
+    - 모형이 그 법칙을 준수하게 만드는 것이 가능하고 합당한지 볼 수 있음
+  - 아니면 **구현**을 살펴보면서, 그 구현이 지키는 **법칙**들을 추출할 수 있음
