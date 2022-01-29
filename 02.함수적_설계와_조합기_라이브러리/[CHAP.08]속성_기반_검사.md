@@ -119,3 +119,84 @@ val failingProp = forAll(intList)(ns => ns.reverse = ns)
     ```scala
     trait Prop { def &&(p: Prop): Prop}
     ```
+
+## 8.2.2. 속성의 의미와 API
+- `Prop` 형식을 위한 함수는 세 가지
+  - 속성을 생성하는 `forAll`
+  - 속성들의 합성을 위한 `&&`
+  - 속성의 점검을 위한 `check`
+    - console 출력이라는 부수 효과도 존재
+    - 이 함수를 **편의용 함수**로 노출하는건 괜찮으나,
+    - **합성의 기저**로 사용할 수는 없음
+    - e.g. `&&`의 표현이 단순 `check`메서드라면, `Prop`을 위한 `&&`을 구현할 수 없음
+- 코드
+  ```scala
+  trait Prop {
+    def check: Unit
+    def &&(p: Prop): Prop = ???
+  }
+  ```
+- `check`에는 부수효과가 있기 때문에
+  - `&&`을 구현하는 유일한 선택은
+  - 두 `check`메서드를 모두 실행하는 것
+- 만일 `check`가 **검사 결과 메세지**를 출력한다면
+  - `&&`에 의해 두 개의 메시지가 출력
+  - 그 메세지들은 두 속성의 **성공/실패 여부**를 각자 따로 판정한 결과
+  - 이는 정확한 구현은 아님
+- `check`에 `부수 효과가 있다는 것` 자체는 큰 문제는 아님
+  - 더 일반적으로 보았을때, `check`가 정보를 **폐기**하는 것이 중요한 문제
+- `Prop` 값들을 `&&`와 같은 조합기를 이용하여 조합하려면,
+- `check`(또는 그 속성을 **실행**하는 어떤 함수)는 뭔가 **의미 있는 값**을 돌려주어야 함
+  - 그 형식은?
+- 형식 선택을 위해서,
+  - 속성을 검사하여 얻고자 하는 정보를 먼저 구상
+  - 적어도 속성 검사의 **성공/실패 여부**는 알아야 함
+- 코드
+  ```scala
+  trait Prop {
+    def check: Boolean
+  }
+  ```
+  - 위 표현에서 `Prop`은 **비엄격 Boolean**값
+  - 모든 `Boolean`에 대해 정의할 수 있음
+  - 단, `Boolean`만으로 부족할 수 있음
+    - 어떤 속성이 실패했을 때, `성공한 검례 수`, `실패 유발한 인수들이 무엇인지`에 대한 정보 등 ..
+- 위 내용을 보완하여,
+  - **성공/실패 여부**를 나타내기 위해 `Either`를 사용한 코드
+    ```scala
+    object Prop {
+      // 이런 별칭은, API의 가독성에 도움이 됨
+      type SuccessCount = Int
+      ...
+    }
+    trait Prop { def check: Either[???, SuccessCount]}
+    ```
+- 실패의 경우에는
+  - 실패 사실을 화면에 출력, 검사를 실행한 사람이 볼 수 있도록 해야 함
+  - 검사의 목적은 버그를 찾아내고, 그 버그를 드러나게 한 **검례**가 무엇인지 제시해야 함
+- 일반적인 규칙으로
+  - 계산에 사용할 자료를 나타내는데 `String`은 부적합
+  - 사람에게 표시할 자료라면, `String`을 사용하는데 문제 없음
+- 위 논의를 정리한 코드
+  ```scala
+  object Prop {
+    type FailedCase = String
+    type SuccessCount = Int
+  }
+
+  trait Prop {
+    def check: Either[(FailedCase, SuccessCount), SuccessCount]
+  }
+  ```
+  - 실패의 경우 `Left((s, n))`을 돌려줌
+    - `s`: 속성이 실패하게 만든 값을 나타내는 `String`
+    - `n`: 실패 이전에 성공한 검례들의 수
+- `check`의 인수
+  - 현재는 인자가 없으나 충분할까?
+  - `Prop`이 접근해야 할 정보는 `Prop`이 생성되는 방식을 보면 파악 가능
+    ```scala
+    // Prop을 생성하는 forAll 함수
+    def forAll[A](a: Gen[A])(f: A => Boolean): Prop
+    ```
+- `Gen`의 구체적인 표현을 모르기 때문에,
+  - `A`형식의 값을 생성하는데 충분한 정보(`check`의 구현에 필요한)가 갖춰졌는지 판단하기 어려움
