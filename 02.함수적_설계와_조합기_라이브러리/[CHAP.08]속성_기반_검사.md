@@ -249,3 +249,26 @@ val failingProp = forAll(intList)(ns => ns.reverse = ns)
 - 어디에서 시작하는 것은 중요하지 않음
   - 계속 놀다 보면, 모든 **설계상**의 선택을 독자가 결정하게 될 때까지
   - 문제 영역이 독자를 이끌 것
+
+## 8.2.4. 생성된 값들에 의존하는 생성기
+- `둘쨰 문자열`이 `첫 문자열`의 문자들로만 이루어진다는 조건을 만족하는
+  - **문자열 쌍 생성기**(`Gen[(String, String)]`)이 있다고 가정
+- 또는 `Gen[Int]`로 `0 ~ 11` 사이의 정수를 선택하고,
+  - `Gen[List[Double]]`이 그 값을 **목록의 길이**로 사용해서 목록을 생성하나독 가정
+- 두 경우 모두 **일정한 의존성**이 존재
+- 먼저 `하나의 값`이 생성되고
+  - 그 값은 **생성기**가 다음에 생성할 값들을 결정하는데 쓰임
+- 이런 생성 방식을 지원하려면
+  - **한 생성기**가 **다른 생성기**에 의존하게 만드는 `flatMap`이 필요
+- 예시
+  ```scala
+  def flatMap[B](f: A => Gen[B]): Gen[B]
+  // listOfN의 동적인 버전
+  def listOfN(size: Gen[Int]): Gen[List[A]]
+
+  // 생성기를 결합하는 `union`, 각 생성기의 값을 동일 확률로 뽑아서 취합
+  def union[A](g1: Gen[A], g2: Gen[A]): Gen[A]
+
+  // union과 비슷하지만, 가중치를 받아 `Gen`에서 가중치에 비례하는 확률들로 뽑는 weighted
+  def weghted[A](g1: (Gen[A],Double), g2: (Gen[A],Double)): Gen[A]
+  ```
