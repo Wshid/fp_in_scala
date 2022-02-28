@@ -272,3 +272,93 @@ val failingProp = forAll(intList)(ns => ns.reverse = ns)
   // union과 비슷하지만, 가중치를 받아 `Gen`에서 가중치에 비례하는 확률들로 뽑는 weighted
   def weghted[A](g1: (Gen[A],Double), g2: (Gen[A],Double)): Gen[A]
   ```
+
+## 8.2.5. Prop 자료 형식의 정련
+- `Gen`의 표현을 고찰하면서 `Prop`의 요구사항에 관한 정보를 얻음
+- `Prop`의 정의
+  ```scala
+  trait Prop {
+    def check: Either([FailedCase, SuccessCount), SuccessCount])
+  }
+  ```
+- 단순 **비엄격 `Either`**
+- 여기엔 몇가지 정보가 빠져 있음
+  - **성공한 검례 수**는 `SuccessCount`에 담겨있지만,
+  - 속성이 **검사**를 통과했다는 결론을 내리는 데 **충분한 검례의 수**는 지정하지 않음
+- 그 개수를 코드에 직접 작성할 수 있으나,
+  - 그러한 **의존성**을 적절히 **추상화**하기
+    ```scala
+    type TestCases = Int
+    type Result = Either[(FailedCase, SuccessCount), SuccessCount]
+    case class Prop(run: TestCases => Result)
+    ```
+- 현재 **성공적인 검사의 수**를 `Either` 양변 모두에 기록
+  - 그러나 어떤 한 **속성**이 **검사**를 통과했다면
+  - 이 **통과된 검례의 수**가 `run`의 인수와 동일함을 의미
+- 따라서 **성공 횟수**를 알려준다고 해도
+  - `run`의 호출자가 새로운 것을 알게되는 것은 아님
+- `Either`의 `Right` 경우에 어떠한 정보도 필요하지 않으므로, 이를 `Option`으로 변경
+  ```scala
+  type Result = Option[(FailedCase, SuccessCount)]
+  case class Prop(run: TestCaes => Result)
+  ```
+- `None`은 모든 검례가 **성공**해서
+  - 속성이 검사를 통과했음을 뜻함
+- `Some`은 **실패**가 있었다는 것을 뜻함
+  - 이상한 점?
+    - 기존에는 `None`이 실패를 의미했지만, 지금은 **부재**를 나타내는 용도로 사용
+    - `Option`에 적법한 용도이나, **의도가 명확하지 않음**
+- `Option[(FailedCase, SuccessCount)]`에 해당하되,
+  - 의도를 명확히 나타낼 수 있는 새로운 자료 형식 구성
+
+#### CODE.8.2. 새로운 Result 자료 형식
+```scala
+sealed trait Result {
+  def isFalsified: Boolean
+}
+case object Passed extends Result { // 모든 검사를 통과했음을 나타냄
+  def isFalsified = false
+}
+case class Falsified(failure: FailedCase, // 검사들 중 하나가 속성을 반증
+                     successes: SuccessCount) extends Result {
+  def isFalsified = true
+}
+```
+- 위 내용으로 `Prop`의 표현으로 충분할지?
+- `forAll`이 구현 가능한지 살펴보기
+  ```scala
+  def forAll[A](a: Gen[A])(f: A => Boolean): Prop
+  ```
+- `forAll`이 가진 정보는 `Prop`을 돌려주기에 충분하지 않음
+  - `Prop.run`에는 **시도할 검례 수**외에도
+  - **검례들을 생성하는 모든 정보**가 필요함
+- `Prop.run`이 `Gen`의 현재 표현을 이용해서 **무작위 검례**를 생성해야 한다면
+  - `RNG`가 필요할 것
+- 해당 의존성으로 `Prop`에 표현
+  ```scala
+  case class Prop(run: (TestCases, RNG) => Result)
+  ```
+- 추후 **검례 개수**와 **무작위성의 원천**외에도, 다른 **의존성**이 필요할 경우
+  - 그에 해당하는 **매개변수**를 `Prop.run`에 추가하면 됨
+
+#### CODE.8.3. forAll의 구현
+```scala
+def forAll[A](as: Gen[A])(f: A => Boolean): Prop = Prop { // (a,i) 쌍들의 스트림, a는 무작위 값, i는 스트림 안에서의 그 값의 색인
+  (n, rng) => randomStream(as)(rng).zip(Stream.from(0)).take(n).map {
+    case (a, i) => try {
+      if (f(a)) Passed else Falsified(a.toString, i) // 검사 실패시, 실패한 검례 및 그 색인을 기록. 이를 통해 성공한 검사들의 개수 파악 가능
+    } catch { case e: Exception => Falsified(buildMsg(a, e), i)} // 검례 예외 발생시, 그 사실을 결과에 기록
+  }.find(_.isFalsified).getOrElse(Passed)
+}
+
+def randomStream[A](g: Gen[A])(rng: RNG): Stream[A] =
+  Stream.unfold(rng)(rng => Some(g.sample.run(rng))) // 생성기에서 표본을 거듭 추출, A의 무한 스트림 생성
+
+def buildMsg[A](s: A, e: Exception): String =
+  s"test case: $s\n" + // 문자열 보간 구분
+  s"generated an exception: ${e.getMessage}\n" +
+  s"stack trace:\n ${e.getStackTrace.mkString("\n")}"
+```
+- 예외가 발생하면 `run`이 그것을 던지게 되면,
+  - **실패**를 유발한 인수에 관한 정보가 사라짐
+- 이에, **예외**를 잡아서 **실패**로서 보고하게 한다는점에 주목
