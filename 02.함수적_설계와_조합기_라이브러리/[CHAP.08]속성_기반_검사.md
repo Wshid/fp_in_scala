@@ -424,3 +424,43 @@ def forAll[A](g: Int => Gen[A])(f: A => Boolean): Prop = Prop {
     prop.run(max, n, rng)
 }
 ```
+
+## 8.4. 라이브러리 사용과 사용성 개선
+
+### 8.4.1. 간단한 예제 몇 가지
+- `List`의 메서드로 존재하는 함수 max의 행동 방식을 명시하는 문제 고민
+  - 목록의 최댓값은 목록의 다른 모든 요소보다 크거나 같아야 함
+- 코드
+  ```scala
+  val smallInt = Gen.choose(-10, 10)
+  val maxProp = forAll(listOf(smallInt)) { ns  => 
+    val max = ns.max
+    !ns.exists(_ > max) // ns에 max보다 큰 값이 존재해서는 안됨
+  }
+  ```
+- 현재의 API에서 `Prop`에 `run`을 직접 실행하는 것은 다소 번거로움
+  - `Prop`값을 실행하고 그 결과를 유용한 형식으로 콘솔에 출력해주는 보조 함ㅁ수 도입
+  - 이런 함수를 `Prop`의 동반 객체의 메서드로 생성
+
+#### CODE.8.5. Prop을 위한 run 보조 함수
+```scala
+def run(p: Prop,
+        maSize: Int = 100,
+        testCases: Int = 100,
+        rng: RNG = RNG.simple(System.currentTImeMillis)): Unit =
+      p.run(maxSize, testCases, rng) match {
+        case Falsified(msg, n) => println(s"! Falsified after $n passed tests:\n $msg")
+        case Passed => println(s"+ OK, passed $testCases tests.")
+      }
+```
+- 이 구현은 스칼라의 **기본 인수**(인수 기본값) 기능을 활용
+  - 메서드를 호출하기 조금 더 편함
+- 검례 개수의 기본값은
+  - 다양한 경우들을 충분히 점검할 수 있을 정도로 **큰 값**이면서도
+  - 검례가 너무 많아서 실행이 너무 오래 걸리지는 않을 정도로 **작은 값**이어야 함
+- `run(maxProp)`을 실행하면, 속성이 실패했다는 결과 노출
+  - **속성기반검사**는 코드에 숨어 있는 가정을 나타내는 한 방법
+- 결과적으로 프로그래머는 그러한 가정들을
+  - 좀 더 **명시적**으로 코드에 지정하게 됨
+- 표준 라이브러리의 `max` 구현은 **빈 목록**이 주어지면 **폭주**(crash)
+  - 이 점을 고려하여 속성을 고칠 필요가 있음
