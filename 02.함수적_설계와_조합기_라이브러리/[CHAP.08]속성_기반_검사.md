@@ -464,3 +464,85 @@ def run(p: Prop,
   - 좀 더 **명시적**으로 코드에 지정하게 됨
 - 표준 라이브러리의 `max` 구현은 **빈 목록**이 주어지면 **폭주**(crash)
   - 이 점을 고려하여 속성을 고칠 필요가 있음
+
+### 8.4.2. 병렬 계산을 위한 검사 모음 작성
+- **병렬 계산**에 대해 반드시 성립 필요
+  - 이를 검사 라이브러리로 표현하려면?
+    ```scala
+    // CHAP.7의 첫 법칙 -> 특정한 검례
+    map(unit(1))(_ + 1) == unit(2)
+
+    // 표현은 가능
+    val ES: ExecutorService = Executors.newCachedThreadPool
+    val p1 = Prop.forAll(Gen.unit(Par.unit(1)))(i => 
+      Par.map(i)(_ + 1)(ES).get == Par.unit(2)(ES).get)
+    ```
+    - 단, 깔끔하게 표현되지는 않음
+      - `Par[A]`의 표현이 `ExecutorService => Future[A]`의 별칭이라는 가정 때문
+- 법칙을 검례로 표현하긴 했지만
+  - 다소 장황, 지저분
+  - 검례에 깔린 `idea`가 중요하지 않은 `세부사항`에 가려짐
+- `API`의 표현력 부재때문이 아닌
+  - 몇 가지 누락된 **보조 함수**들과
+  - 지저분한 구문의 조합 때문
+
+#### 속성의 증명
+- 이 검례에 대해 `forAll`이 다소 과하게 일반적
+  - 이 검사에서는 **입력**이 **가변적**이지 않음
+  - 구체적인 수치가 **코드 자체**에 박혀 있음
+- **하드코딩 검례**는 `unit testing` 라이브러리를 사용할 때만큼이나
+  - 간단하게 작성할 수 있어야 함
+- 조합기 도입(`Prop` 동반 객체의 메서드로 추가)
+  ```scala
+  def check(p: => Boolean): Prop
+  ```
+- 이를 구현하는 첫번째 방법. `forAll` 사용하기
+  ```scala
+  def check(p: => Boolean): Prop = { // 비엄격 함수
+    lazy val result = p // 재계산을 피하기 위해 결과를 메모화
+      forAll(unit(()))(_ => result)
+  }
+  ```
+  - 이 구현은 **단위 생성기**를 이용해서 값을 하나만 생성할 뿐,
+    - 단지 주어진 `Boolean`을 평가하기 위함
+  - 생성된 값 자체는 사용되지 않고 무시됨
+- 결과가 **단 한번만 평가**되도록 **메모화**된다고 해도
+  - 검사 실행기는 여전히 **여러 개의 검례**를 생성하여 `Boolean`을 여러번 점검
+    - e.g. `run(check(true))`로 호출하면, 검사 실행기는 속성을 100번 검사 이후, `Ok, passed 100 tests.`를 출력
+  - 하지만 항상 `true`인 속성을 `100`번점검하는 것은 헛수고
+  - 이 문제는 **새로운 기본 수단**을 도입해야 해결됨
+- 현재 `Prop`의 표현
+  - `(MaxSize, TestCases, RNG) => Result`형식의 함수
+  - `Result`는 `Passed`또는 `Falsified`
+- 검례 개수를 무시하는 `Prop`을 구축하는 `check`라는 기본 수단 새로 생성
+  ```scala
+  def check(p: => Boolean): Prop = Prop { (_, _, _) =>
+    if (p) Passed else Falsified("()", 0)
+  }
+  ```
+  - `forAll`을 사용하는 것보다 훨 나음
+  - 하지만 `run(check(true))`가 속성을 한번만 검사하나
+    - 여전히 출력은 `OK, passed 100 tests`를 출력
+  - 이는, `다수의 검사에서 반례가 증명되지 않아`서 `pass`가 아닌
+    - 그냥 **한번의 검사**에 의해 **증명**된 것
+- 따라서 새로운 종류의 `Result` 도입 필요
+  ```scala
+  case object Proved extends Result
+  ```
+- `check`가 생성한 속성이 `Passed`대신 `Proved`를 돌려주게끔 변환
+  - 검사 실행기도 이를 반영하여 수정 필요
+
+##### CODE.8.6. Proved 객체를 돌려주도록 수정한 run
+```scala
+def run(p: Prop,
+        maxSize: Int = 100,
+        testCases: Int = 100,
+        rng: RNG = RNG.Simple(System.currentTimeMillis)): Unit =
+          p.run(maxSize, testCases, rng) match {
+            case Falsified((msg, n)) => println(s"! Falsified after $n passed tests:\n $msg")
+            case Passed => println(s"+ OK, passed $testCases tests.")
+            case Proved => println(s"+ OK, proved property.")
+          }
+```
+- `&&` 같은 `Prop` 조합기들의 구현도 적절히 수정 필요
+  - 그런 조합기들은 `Passed` 결과와 `Proved` 결과를 구분할 필요가 없으므로, 구현 고치는 것은 간단
